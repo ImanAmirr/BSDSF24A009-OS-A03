@@ -1,20 +1,92 @@
 #include "shell.h"
+#include <fcntl.h>
 
-int execute(char* arglist[]) {
-    int status;
-    int cpid = fork();
+static void child_fail(const char* operation) {
+    perror(operation);
+    _exit(EXIT_FAILURE);
+}
 
-    switch (cpid) {
-        case -1:
-            perror("fork failed");
-            exit(1);
-        case 0: // Child process
-            execvp(arglist[0], arglist);
-            perror("Command not found"); // This line runs only if execvp fails
-            exit(1);
-        default: // Parent process
-            waitpid(cpid, &status, 0);
-            // printf("Child pid:%d exited with status %d\n", cpid, status >> 8);
-            return 0;
+int execute_pipeline(const pipeline_t* pipeline, char* history[],
+                     int history_count, int history_start, int history_total) {
+    int pipes[MAX_PIPELINE - 1][2];
+    pid_t child_pids[MAX_PIPELINE];
+    int pipe_count = pipeline->command_count - 1;
+
+    for (int i = 0; i < pipe_count; i++) {
+        if (pipe(pipes[i]) < 0) {
+            perror("pipe");
+            for (int j = 0; j < i; j++) {
+                close(pipes[j][0]);
+                close(pipes[j][1]);
+            }
+            return -1;
+        }
     }
+
+    int child_count = 0;
+    for (int i = 0; i < pipeline->command_count; i++) {
+        pid_t child_pid = fork();
+        if (child_pid < 0) {
+            perror("fork");
+            break;
+        }
+        if (child_pid == 0) {
+            if (i > 0 && dup2(pipes[i - 1][0], STDIN_FILENO) < 0) {
+                child_fail("dup2 pipe input");
+            }
+            if (i < pipe_count && dup2(pipes[i][1], STDOUT_FILENO) < 0) {
+                child_fail("dup2 pipe output");
+            }
+
+            for (int j = 0; j < pipe_count; j++) {
+                close(pipes[j][0]);
+                close(pipes[j][1]);
+            }
+
+            const shell_command_t* command = &pipeline->commands[i];
+            if (command->input_file != NULL) {
+                int input_fd = open(command->input_file, O_RDONLY);
+                if (input_fd < 0) child_fail(command->input_file);
+                if (dup2(input_fd, STDIN_FILENO) < 0) child_fail("dup2 input");
+                close(input_fd);
+            }
+            if (command->output_file != NULL) {
+                int output_fd = open(command->output_file,
+                                     O_WRONLY | O_CREAT | O_TRUNC, 0666);
+                if (output_fd < 0) child_fail(command->output_file);
+                if (dup2(output_fd, STDOUT_FILENO) < 0) child_fail("dup2 output");
+                close(output_fd);
+            }
+
+            int builtin_result = handle_builtin(command->arglist, history,
+                                                history_count, history_start,
+                                                history_total);
+            if (builtin_result) {
+                fflush(stdout);
+                _exit(EXIT_SUCCESS);
+            }
+
+            execvp(command->arglist[0], command->arglist);
+            perror(command->arglist[0]);
+            _exit(127);
+        }
+
+        child_pids[child_count++] = child_pid;
+    }
+
+    for (int i = 0; i < pipe_count; i++) {
+        close(pipes[i][0]);
+        close(pipes[i][1]);
+    }
+
+    for (int i = 0; i < child_count; i++) {
+        int status;
+        while (waitpid(child_pids[i], &status, 0) < 0) {
+            if (errno != EINTR) {
+                perror("waitpid");
+                break;
+            }
+        }
+    }
+    return child_count == pipeline->command_count ? 0 : -1;
 }

@@ -91,46 +91,153 @@ char** shell_completion(const char* text, int start, int end) {
     return NULL;
 }
 
-char** tokenize(char* cmdline) {
-    // Edge case: empty command line
-    if (cmdline == NULL || cmdline[0] == '\0' || cmdline[0] == '\n') {
-        return NULL;
-    }
+static int is_operator(char character) {
+    return character == '<' || character == '>' || character == '|';
+}
 
-    char** arglist = (char**)malloc(sizeof(char*) * (MAXARGS + 1));
-    for (int i = 0; i < MAXARGS + 1; i++) {
-        arglist[i] = (char*)malloc(sizeof(char) * ARGLEN);
-        bzero(arglist[i], ARGLEN);
-    }
-
-    char* cp = cmdline;
-    char* start;
-    int len;
-    int argnum = 0;
-
-    while (*cp != '\0' && argnum < MAXARGS) {
-        while (*cp == ' ' || *cp == '\t') cp++; // Skip leading whitespace
-
-        if (*cp == '\0') break; // Line was only whitespace
-
-        start = cp;
-        len = 1;
-        while (*++cp != '\0' && !(*cp == ' ' || *cp == '\t')) {
-            len++;
+void free_pipeline(pipeline_t* pipeline) {
+    for (int i = 0; i < pipeline->command_count; i++) {
+        shell_command_t* command = &pipeline->commands[i];
+        for (int j = 0; command->arglist[j] != NULL; j++) {
+            free(command->arglist[j]);
         }
-        strncpy(arglist[argnum], start, len);
-        arglist[argnum][len] = '\0';
-        argnum++;
+        free(command->input_file);
+        free(command->output_file);
+    }
+    memset(pipeline, 0, sizeof(*pipeline));
+}
+
+int parse_line(char* cmdline, pipeline_t* pipeline) {
+    memset(pipeline, 0, sizeof(*pipeline));
+    pipeline->command_count = 1;
+    char* first = cmdline;
+    while (*first == ' ' || *first == '\t') first++;
+    if (*first == '\0') return 0;
+
+    int current_command = 0;
+    char pending_redirection = '\0';
+    size_t line_length = strlen(cmdline);
+    char* cursor = cmdline;
+
+    while (*cursor != '\0') {
+        while (*cursor == ' ' || *cursor == '\t') cursor++;
+        if (*cursor == '\0') break;
+
+        if (is_operator(*cursor)) {
+            char operation = *cursor++;
+            shell_command_t* command = &pipeline->commands[current_command];
+            if (operation == '|') {
+                if (pending_redirection != '\0' || command->arglist[0] == NULL ||
+                    pipeline->command_count == MAX_PIPELINE) {
+                    fprintf(stderr, "syntax error near '|'.\n");
+                    free_pipeline(pipeline);
+                    return 0;
+                }
+                current_command = pipeline->command_count++;
+            } else {
+                if (pending_redirection != '\0') {
+                    fprintf(stderr, "syntax error: missing redirection target.\n");
+                    free_pipeline(pipeline);
+                    return 0;
+                }
+                pending_redirection = operation;
+            }
+            continue;
+        }
+
+        char* word = (char*)malloc(line_length + 1);
+        if (word == NULL) {
+            perror("parse");
+            free_pipeline(pipeline);
+            return 0;
+        }
+        size_t word_length = 0;
+        char quote = '\0';
+        int word_started = 0;
+        while (*cursor != '\0') {
+            char character = *cursor;
+            if (quote == '\0' && (character == ' ' || character == '\t' ||
+                                   is_operator(character))) {
+                break;
+            }
+            cursor++;
+            if (quote != '\0' && character == quote) {
+                quote = '\0';
+                word_started = 1;
+            } else if (quote == '\0' && (character == '\'' || character == '"')) {
+                quote = character;
+                word_started = 1;
+            } else if (character == '\\' && quote != '\'' && *cursor != '\0') {
+                word[word_length++] = *cursor++;
+                word_started = 1;
+            } else {
+                word[word_length++] = character;
+                word_started = 1;
+            }
+        }
+        if (quote != '\0') {
+            fprintf(stderr, "syntax error: unmatched quote.\n");
+            free(word);
+            free_pipeline(pipeline);
+            return 0;
+        }
+        if (!word_started) {
+            free(word);
+            continue;
+        }
+        word[word_length] = '\0';
+
+        shell_command_t* command = &pipeline->commands[current_command];
+        if (pending_redirection == '<') {
+            if (command->input_file != NULL) {
+                fprintf(stderr, "syntax error: duplicate input redirection.\n");
+                free(word);
+                free_pipeline(pipeline);
+                return 0;
+            }
+            command->input_file = word;
+            pending_redirection = '\0';
+        } else if (pending_redirection == '>') {
+            if (command->output_file != NULL) {
+                fprintf(stderr, "syntax error: duplicate output redirection.\n");
+                free(word);
+                free_pipeline(pipeline);
+                return 0;
+            }
+            command->output_file = word;
+            pending_redirection = '\0';
+        } else {
+            int arg_count = 0;
+            while (command->arglist[arg_count] != NULL) arg_count++;
+            if (arg_count == MAXARGS) {
+                fprintf(stderr, "parse: too many arguments.\n");
+                free(word);
+                free_pipeline(pipeline);
+                return 0;
+            }
+            command->arglist[arg_count] = word;
+        }
     }
 
-    if (argnum == 0) { // No arguments were parsed
-        for(int i = 0; i < MAXARGS + 1; i++) free(arglist[i]);
-        free(arglist);
-        return NULL;
+    if (pending_redirection != '\0') {
+        fprintf(stderr, "syntax error: missing redirection target.\n");
+        free_pipeline(pipeline);
+        return 0;
     }
+    for (int i = 0; i < pipeline->command_count; i++) {
+        if (pipeline->commands[i].arglist[0] == NULL) {
+            fprintf(stderr, "syntax error: missing command.\n");
+            free_pipeline(pipeline);
+            return 0;
+        }
+    }
+    return 1;
+}
 
-    arglist[argnum] = NULL;
-    return arglist;
+int is_builtin_command(const char* command) {
+    return strcmp(command, "cd") == 0 || strcmp(command, "exit") == 0 ||
+           strcmp(command, "help") == 0 || strcmp(command, "history") == 0 ||
+           strcmp(command, "jobs") == 0;
 }
 
 int expand_history(char** cmdline, char* history[], int history_count,
@@ -199,7 +306,7 @@ void add_to_history(char* history[], int* history_count, int* history_start,
     (*history_total)++;
 }
 
-int handle_builtin(char** arglist, char* history[], int history_count,
+int handle_builtin(char* const arglist[], char* history[], int history_count,
                    int history_start, int history_total) {
     if (strcmp(arglist[0], "exit") == 0) {
         return 1;
