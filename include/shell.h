@@ -16,8 +16,8 @@
 #define PROMPT "FCIT> "
 
 // Function prototypes
-char* read_cmd(char* prompt, FILE* fp);
 char** tokenize(char* cmdline);
+char** shell_completion(const char* text, int start, int end);
 int expand_history(char** cmdline, char* history[], int history_count,
                    int history_start, int history_total);
 void add_to_history(char* history[], int* history_count, int* history_start,

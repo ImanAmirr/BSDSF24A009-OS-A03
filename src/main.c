@@ -1,4 +1,6 @@
 #include "shell.h"
+#include <readline/readline.h>
+#include <readline/history.h>
 
 int main() {
     char* cmdline;
@@ -9,7 +11,16 @@ int main() {
     int history_total = 0;
     int should_exit = 0;
 
-    while (!should_exit && (cmdline = read_cmd(PROMPT, stdin)) != NULL) {
+    using_history();
+    rl_readline_name = "myshell";
+    rl_attempted_completion_function = shell_completion;
+    rl_bind_key('\t', rl_complete);
+
+    while (!should_exit && (cmdline = readline(PROMPT)) != NULL) {
+        if (cmdline[0] != '\0') {
+            add_history(cmdline);
+        }
+
         int expansion_result = expand_history(&cmdline, history, history_count,
                                               history_start, history_total);
         if (expansion_result < 0) {
