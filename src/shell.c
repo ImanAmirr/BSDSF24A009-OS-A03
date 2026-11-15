@@ -104,10 +104,18 @@ void free_pipeline(pipeline_t* pipeline) {
         free(command->input_file);
         free(command->output_file);
     }
+    free(pipeline->command_line);
     memset(pipeline, 0, sizeof(*pipeline));
 }
 
-int parse_line(char* cmdline, pipeline_t* pipeline) {
+void free_command_list(command_list_t* commands) {
+    for (int i = 0; i < commands->pipeline_count; i++) {
+        free_pipeline(&commands->pipelines[i]);
+    }
+    memset(commands, 0, sizeof(*commands));
+}
+
+static int parse_pipeline(char* cmdline, pipeline_t* pipeline) {
     memset(pipeline, 0, sizeof(*pipeline));
     pipeline->command_count = 1;
     char* first = cmdline;
@@ -234,6 +242,94 @@ int parse_line(char* cmdline, pipeline_t* pipeline) {
     return 1;
 }
 
+static int add_pipeline_segment(char* segment, int background,
+                                command_list_t* commands) {
+    char* start = segment;
+    while (*start == ' ' || *start == '\t') start++;
+    char* end = start + strlen(start);
+    while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
+    if (end == start) {
+        if (background) {
+            fprintf(stderr, "syntax error: '&' requires a command.\n");
+            return 0;
+        }
+        return 1;
+    }
+    *end = '\0';
+
+    if (commands->pipeline_count == MAX_CHAIN) {
+        fprintf(stderr, "parse: too many chained commands.\n");
+        return 0;
+    }
+
+    pipeline_t* pipeline = &commands->pipelines[commands->pipeline_count];
+    if (!parse_pipeline(start, pipeline)) {
+        return 0;
+    }
+    pipeline->background = background;
+
+    size_t source_length = strlen(start);
+    pipeline->command_line = (char*)malloc(source_length + (background ? 3 : 1));
+    if (pipeline->command_line == NULL) {
+        perror("parse");
+        free_pipeline(pipeline);
+        return 0;
+    }
+    memcpy(pipeline->command_line, start, source_length);
+    if (background) {
+        memcpy(pipeline->command_line + source_length, " &", 3);
+    } else {
+        pipeline->command_line[source_length] = '\0';
+    }
+    commands->pipeline_count++;
+    return 1;
+}
+
+int parse_line(char* cmdline, command_list_t* commands) {
+    memset(commands, 0, sizeof(*commands));
+    char* segment = cmdline;
+    char quote = '\0';
+
+    for (char* cursor = cmdline; ; cursor++) {
+        char character = *cursor;
+        if (character == '\0') {
+            if (quote != '\0') {
+                fprintf(stderr, "syntax error: unmatched quote.\n");
+                free_command_list(commands);
+                return 0;
+            }
+            if (!add_pipeline_segment(segment, 0, commands)) {
+                free_command_list(commands);
+                return 0;
+            }
+            break;
+        }
+
+        if (quote != '\'' && character == '\\' && cursor[1] != '\0') {
+            cursor++;
+            continue;
+        }
+        if (quote == '\0' && (character == '\'' || character == '"')) {
+            quote = character;
+            continue;
+        }
+        if (quote != '\0' && character == quote) {
+            quote = '\0';
+            continue;
+        }
+        if (quote == '\0' && (character == ';' || character == '&')) {
+            *cursor = '\0';
+            if (!add_pipeline_segment(segment, character == '&', commands)) {
+                free_command_list(commands);
+                return 0;
+            }
+            segment = cursor + 1;
+        }
+    }
+
+    return commands->pipeline_count > 0;
+}
+
 int is_builtin_command(const char* command) {
     return strcmp(command, "cd") == 0 || strcmp(command, "exit") == 0 ||
            strcmp(command, "help") == 0 || strcmp(command, "history") == 0 ||
@@ -307,7 +403,8 @@ void add_to_history(char* history[], int* history_count, int* history_start,
 }
 
 int handle_builtin(char* const arglist[], char* history[], int history_count,
-                   int history_start, int history_total) {
+                   int history_start, int history_total,
+                   const background_job_t jobs[], int job_count) {
     if (strcmp(arglist[0], "exit") == 0) {
         return 1;
     }
@@ -336,7 +433,13 @@ int handle_builtin(char* const arglist[], char* history[], int history_count,
     }
 
     if (strcmp(arglist[0], "jobs") == 0) {
-        printf("Job control not yet implemented.\n");
+        for (int i = 0; i < job_count; i++) {
+            printf("[%d]", i + 1);
+            for (int j = 0; j < jobs[i].process_count; j++) {
+                printf(" %ld", (long)jobs[i].pids[j]);
+            }
+            printf(" %s\n", jobs[i].command_line);
+        }
         return 1;
     }
 

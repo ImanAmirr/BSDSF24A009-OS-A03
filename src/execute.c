@@ -7,7 +7,9 @@ static void child_fail(const char* operation) {
 }
 
 int execute_pipeline(const pipeline_t* pipeline, char* history[],
-                     int history_count, int history_start, int history_total) {
+                     int history_count, int history_start, int history_total,
+                     const background_job_t jobs[], int job_count,
+                     pid_t spawned_pids[], int* spawned_count) {
     int pipes[MAX_PIPELINE - 1][2];
     pid_t child_pids[MAX_PIPELINE];
     int pipe_count = pipeline->command_count - 1;
@@ -60,7 +62,7 @@ int execute_pipeline(const pipeline_t* pipeline, char* history[],
 
             int builtin_result = handle_builtin(command->arglist, history,
                                                 history_count, history_start,
-                                                history_total);
+                                                history_total, jobs, job_count);
             if (builtin_result) {
                 fflush(stdout);
                 _exit(EXIT_SUCCESS);
@@ -79,6 +81,22 @@ int execute_pipeline(const pipeline_t* pipeline, char* history[],
         close(pipes[i][1]);
     }
 
+    *spawned_count = child_count;
+    for (int i = 0; i < child_count; i++) {
+        spawned_pids[i] = child_pids[i];
+    }
+
+    if (child_count != pipeline->command_count) {
+        for (int i = 0; i < child_count; i++) {
+            while (waitpid(child_pids[i], NULL, 0) < 0 && errno == EINTR) {}
+        }
+        *spawned_count = 0;
+        return -1;
+    }
+    if (pipeline->background) {
+        return 0;
+    }
+
     for (int i = 0; i < child_count; i++) {
         int status;
         while (waitpid(child_pids[i], &status, 0) < 0) {
@@ -88,5 +106,5 @@ int execute_pipeline(const pipeline_t* pipeline, char* history[],
             }
         }
     }
-    return child_count == pipeline->command_count ? 0 : -1;
+    return 0;
 }
