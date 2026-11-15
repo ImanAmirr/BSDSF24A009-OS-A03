@@ -406,21 +406,23 @@ int handle_builtin(char* const arglist[], char* history[], int history_count,
                    int history_start, int history_total,
                    const background_job_t jobs[], int job_count) {
     if (strcmp(arglist[0], "exit") == 0) {
-        return 1;
+        return 0;
     }
 
     if (strcmp(arglist[0], "cd") == 0) {
         if (arglist[1] == NULL) {
             fprintf(stderr, "cd: missing directory\n");
+            return 1;
         } else if (chdir(arglist[1]) != 0) {
             perror("cd");
+            return 1;
         }
-        return 1;
+        return 0;
     }
 
     if (strcmp(arglist[0], "help") == 0) {
         printf("Built-in commands: cd <directory>, exit, help, history, jobs\n");
-        return 1;
+        return 0;
     }
 
     if (strcmp(arglist[0], "history") == 0) {
@@ -429,7 +431,7 @@ int handle_builtin(char* const arglist[], char* history[], int history_count,
             int slot = (history_start + i) % HISTORY_SIZE;
             printf("%d %s\n", first_number + i, history[slot]);
         }
-        return 1;
+        return 0;
     }
 
     if (strcmp(arglist[0], "jobs") == 0) {
@@ -440,8 +442,8 @@ int handle_builtin(char* const arglist[], char* history[], int history_count,
             }
             printf(" %s\n", jobs[i].command_line);
         }
-        return 1;
+        return 0;
     }
 
-    return 0;
+    return BUILTIN_NOT_FOUND;
 }

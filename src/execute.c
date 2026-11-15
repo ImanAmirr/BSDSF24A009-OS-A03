@@ -63,9 +63,9 @@ int execute_pipeline(const pipeline_t* pipeline, char* history[],
             int builtin_result = handle_builtin(command->arglist, history,
                                                 history_count, history_start,
                                                 history_total, jobs, job_count);
-            if (builtin_result) {
+            if (builtin_result != BUILTIN_NOT_FOUND) {
                 fflush(stdout);
-                _exit(EXIT_SUCCESS);
+                _exit(builtin_result);
             }
 
             execvp(command->arglist[0], command->arglist);
@@ -97,14 +97,25 @@ int execute_pipeline(const pipeline_t* pipeline, char* history[],
         return 0;
     }
 
+    int final_status = 0;
     for (int i = 0; i < child_count; i++) {
         int status;
-        while (waitpid(child_pids[i], &status, 0) < 0) {
-            if (errno != EINTR) {
-                perror("waitpid");
-                break;
+        pid_t waited_pid;
+        do {
+            waited_pid = waitpid(child_pids[i], &status, 0);
+        } while (waited_pid < 0 && errno == EINTR);
+        if (waited_pid < 0) {
+            perror("waitpid");
+            final_status = 1;
+        } else if (i == child_count - 1) {
+            if (WIFEXITED(status)) {
+                final_status = WEXITSTATUS(status);
+            } else if (WIFSIGNALED(status)) {
+                final_status = 128 + WTERMSIG(status);
+            } else {
+                final_status = 1;
             }
         }
     }
-    return 0;
+    return final_status;
 }

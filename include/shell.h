@@ -17,6 +17,7 @@
 #define MAX_CHAIN 20
 #define MAX_JOBS 64
 #define PROMPT "FCIT> "
+#define BUILTIN_NOT_FOUND -1
 
 typedef struct {
     char* arglist[MAXARGS + 1];
