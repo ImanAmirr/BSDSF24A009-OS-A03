@@ -1,5 +1,14 @@
 #include "shell.h"
 
+static char* copy_string(const char* source) {
+    size_t length = strlen(source) + 1;
+    char* copy = (char*)malloc(length);
+    if (copy != NULL) {
+        memcpy(copy, source, length);
+    }
+    return copy;
+}
+
 char* read_cmd(char* prompt, FILE* fp) {
     printf("%s", prompt);
     char* cmdline = (char*) malloc(sizeof(char) * MAX_LEN);
@@ -61,9 +70,76 @@ char** tokenize(char* cmdline) {
     return arglist;
 }
 
-int handle_builtin(char** arglist) {
+int expand_history(char** cmdline, char* history[], int history_count,
+                   int history_start, int history_total) {
+    if ((*cmdline)[0] != '!') {
+        return 0;
+    }
+
+    char* end;
+    char* digits = *cmdline + 1;
+    if (*digits == '\0') {
+        fprintf(stderr, "history: invalid event: %s\n", *cmdline);
+        return -1;
+    }
+    for (char* digit = digits; *digit != '\0'; digit++) {
+        if (*digit < '0' || *digit > '9') {
+            fprintf(stderr, "history: invalid event: %s\n", *cmdline);
+            return -1;
+        }
+    }
+
+    errno = 0;
+    long requested = strtol(digits, &end, 10);
+    if (errno == ERANGE || end == *cmdline + 1 || *end != '\0' || requested <= 0) {
+        fprintf(stderr, "history: invalid event: %s\n", *cmdline);
+        return -1;
+    }
+
+    int oldest = history_total - history_count + 1;
+    if (requested < oldest || requested > history_total) {
+        fprintf(stderr, "history: event %ld not found\n", requested);
+        return -1;
+    }
+
+    int slot = (history_start + (int)requested - oldest) % HISTORY_SIZE;
+    char* expanded = copy_string(history[slot]);
+    if (expanded == NULL) {
+        perror("history");
+        return -1;
+    }
+
+    free(*cmdline);
+    *cmdline = expanded;
+    return 1;
+}
+
+void add_to_history(char* history[], int* history_count, int* history_start,
+                    int* history_total, const char* cmdline) {
+    char* copy = copy_string(cmdline);
+    if (copy == NULL) {
+        perror("history");
+        return;
+    }
+
+    int slot;
+    if (*history_count < HISTORY_SIZE) {
+        slot = (*history_start + *history_count) % HISTORY_SIZE;
+        (*history_count)++;
+    } else {
+        slot = *history_start;
+        free(history[slot]);
+        *history_start = (*history_start + 1) % HISTORY_SIZE;
+    }
+
+    history[slot] = copy;
+    (*history_total)++;
+}
+
+int handle_builtin(char** arglist, char* history[], int history_count,
+                   int history_start, int history_total) {
     if (strcmp(arglist[0], "exit") == 0) {
-        exit(EXIT_SUCCESS);
+        return 1;
     }
 
     if (strcmp(arglist[0], "cd") == 0) {
@@ -76,7 +152,16 @@ int handle_builtin(char** arglist) {
     }
 
     if (strcmp(arglist[0], "help") == 0) {
-        printf("Built-in commands: cd <directory>, exit, help, jobs\n");
+        printf("Built-in commands: cd <directory>, exit, help, history, jobs\n");
+        return 1;
+    }
+
+    if (strcmp(arglist[0], "history") == 0) {
+        int first_number = history_total - history_count + 1;
+        for (int i = 0; i < history_count; i++) {
+            int slot = (history_start + i) % HISTORY_SIZE;
+            printf("%d %s\n", first_number + i, history[slot]);
+        }
         return 1;
     }
 
