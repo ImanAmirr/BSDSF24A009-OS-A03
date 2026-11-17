@@ -9,6 +9,7 @@ static void child_fail(const char* operation) {
 int execute_pipeline(const pipeline_t* pipeline, char* history[],
                      int history_count, int history_start, int history_total,
                      const background_job_t jobs[], int job_count,
+                     const shell_variable_t* variables,
                      pid_t spawned_pids[], int* spawned_count) {
     int pipes[MAX_PIPELINE - 1][2];
     pid_t child_pids[MAX_PIPELINE];
@@ -62,7 +63,8 @@ int execute_pipeline(const pipeline_t* pipeline, char* history[],
 
             int builtin_result = handle_builtin(command->arglist, history,
                                                 history_count, history_start,
-                                                history_total, jobs, job_count);
+                                                history_total, jobs, job_count,
+                                                variables);
             if (builtin_result != BUILTIN_NOT_FOUND) {
                 fflush(stdout);
                 _exit(builtin_result);

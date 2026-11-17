@@ -37,6 +37,12 @@ typedef struct {
     int pipeline_count;
 } command_list_t;
 
+typedef struct shell_variable {
+    char* name;
+    char* value;
+    struct shell_variable* next;
+} shell_variable_t;
+
 typedef struct {
     pid_t pids[MAX_PIPELINE];
     int process_count;
@@ -49,16 +55,23 @@ int parse_line(char* cmdline, command_list_t* commands);
 void free_pipeline(pipeline_t* pipeline);
 void free_command_list(command_list_t* commands);
 int is_builtin_command(const char* command);
+int is_variable_assignment(const pipeline_t* pipeline);
+int assign_variable(shell_variable_t** variables, const char* assignment);
+int expand_pipeline_variables(pipeline_t* pipeline,
+                              const shell_variable_t* variables);
+void free_variables(shell_variable_t** variables);
 int expand_history(char** cmdline, char* history[], int history_count,
                    int history_start, int history_total);
 void add_to_history(char* history[], int* history_count, int* history_start,
                     int* history_total, const char* cmdline);
 int handle_builtin(char* const arglist[], char* history[], int history_count,
                    int history_start, int history_total,
-                   const background_job_t jobs[], int job_count);
+                   const background_job_t jobs[], int job_count,
+                   const shell_variable_t* variables);
 int execute_pipeline(const pipeline_t* pipeline, char* history[],
                      int history_count, int history_start, int history_total,
                      const background_job_t jobs[], int job_count,
+                     const shell_variable_t* variables,
                      pid_t spawned_pids[], int* spawned_count);
 
 #endif // SHELL_H

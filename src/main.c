@@ -5,7 +5,8 @@
 
 static int run_builtin(const shell_command_t* command, char* history[],
                        int history_count, int history_start, int history_total,
-                       const background_job_t jobs[], int job_count) {
+                       const background_job_t jobs[], int job_count,
+                       const shell_variable_t* variables) {
     int input_fd = -1;
     int output_fd = -1;
 
@@ -51,7 +52,8 @@ static int run_builtin(const shell_command_t* command, char* history[],
     if (output_fd >= 0) close(output_fd);
 
     int result = handle_builtin(command->arglist, history, history_count,
-                                history_start, history_total, jobs, job_count);
+                                history_start, history_total, jobs, job_count,
+                                variables);
     fflush(stdout);
     if (dup2(saved_stdin, STDIN_FILENO) < 0 ||
         dup2(saved_stdout, STDOUT_FILENO) < 0) {
@@ -152,7 +154,7 @@ static char* trim_line(char* line) {
 static int run_command_line(char* line, char* history[], int history_count,
                             int history_start, int history_total,
                             background_job_t jobs[], int* job_count,
-                            int* should_exit) {
+                            int* should_exit, shell_variable_t** variables) {
     command_list_t commands;
     if (!parse_line(line, &commands)) return 1;
 
@@ -160,12 +162,26 @@ static int run_command_line(char* line, char* history[], int history_count,
     for (int i = 0; i < commands.pipeline_count && !*should_exit; i++) {
         reap_background_jobs(jobs, job_count);
         pipeline_t* pipeline = &commands.pipelines[i];
+
+        /* Expand arguments before deciding whether this is an assignment,
+         * built-in, or external command. */
+        if (!expand_pipeline_variables(pipeline, *variables)) {
+            final_status = 1;
+            continue;
+        }
+
+        if (is_variable_assignment(pipeline)) {
+            final_status = assign_variable(
+                variables, pipeline->commands[0].arglist[0]);
+            continue;
+        }
+
         shell_command_t* first = &pipeline->commands[0];
         if (!pipeline->background && pipeline->command_count == 1 &&
             is_builtin_command(first->arglist[0])) {
             final_status = run_builtin(first, history, history_count,
                                        history_start, history_total,
-                                       jobs, *job_count);
+                                       jobs, *job_count, *variables);
             if (strcmp(first->arglist[0], "exit") == 0) {
                 *should_exit = 1;
             }
@@ -175,6 +191,7 @@ static int run_command_line(char* line, char* history[], int history_count,
             final_status = execute_pipeline(pipeline, history, history_count,
                                            history_start, history_total,
                                            jobs, *job_count,
+                                           *variables,
                                            spawned_pids, &spawned_count);
             if (final_status < 0) final_status = 1;
             if (pipeline->background) {
@@ -315,7 +332,7 @@ static int consume_if_body(char* text, int* in_else, int* complete,
 static int run_if_block(const char* if_line, char* history[], int* history_count,
                         int* history_start, int* history_total,
                         background_job_t jobs[], int* job_count,
-                        int* should_exit) {
+                        int* should_exit, shell_variable_t** variables) {
     const char* condition = if_line;
     while (*condition == ' ' || *condition == '\t') condition++;
     enum { MAX_IF_LINES = 100 };
@@ -419,7 +436,7 @@ static int run_if_block(const char* if_line, char* history[], int* history_count
     if (valid && complete) {
         status = run_command_line(condition_line, history, *history_count,
                                   *history_start, *history_total,
-                                  jobs, job_count, should_exit);
+                                  jobs, job_count, should_exit, variables);
         char** selected_lines = status == 0 ? then_lines : else_lines;
         int selected_count = status == 0 ? then_count : else_count;
         for (int i = 0; i < selected_count && !*should_exit; i++) {
@@ -431,7 +448,7 @@ static int run_if_block(const char* if_line, char* history[], int* history_count
             }
             status = run_command_line(command, history, *history_count,
                                       *history_start, *history_total,
-                                      jobs, job_count, should_exit);
+                                      jobs, job_count, should_exit, variables);
             free(command);
         }
     }
@@ -451,6 +468,7 @@ int main() {
     int should_exit = 0;
     background_job_t jobs[MAX_JOBS] = { 0 };
     int job_count = 0;
+    shell_variable_t* variables = NULL;
 
     using_history();
     rl_readline_name = "myshell";
@@ -480,10 +498,12 @@ int main() {
 
         if (is_if_command(cmdline)) {
             run_if_block(cmdline, history, &history_count, &history_start,
-                         &history_total, jobs, &job_count, &should_exit);
+                         &history_total, jobs, &job_count, &should_exit,
+                         &variables);
         } else {
             run_command_line(cmdline, history, history_count, history_start,
-                             history_total, jobs, &job_count, &should_exit);
+                             history_total, jobs, &job_count, &should_exit,
+                             &variables);
         }
         free(cmdline);
     }
@@ -494,6 +514,7 @@ int main() {
     for (int i = 0; i < job_count; i++) {
         free(jobs[i].command_line);
     }
+    free_variables(&variables);
 
     printf("\nShell exited.\n");
     return 0;

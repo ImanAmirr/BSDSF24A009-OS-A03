@@ -1,6 +1,7 @@
 #include "shell.h"
 #include <readline/readline.h>
 #include <dirent.h>
+#include <stdint.h>
 
 static char* copy_string(const char* source) {
     size_t length = strlen(source) + 1;
@@ -11,8 +12,75 @@ static char* copy_string(const char* source) {
     return copy;
 }
 
+static int is_variable_name_start(char character) {
+    return (character >= 'A' && character <= 'Z') ||
+           (character >= 'a' && character <= 'z') || character == '_';
+}
+
+static int is_variable_name_character(char character) {
+    return is_variable_name_start(character) ||
+           (character >= '0' && character <= '9');
+}
+
+static const char* find_variable_value(const shell_variable_t* variables,
+                                      const char* name, size_t name_length) {
+    for (const shell_variable_t* variable = variables;
+         variable != NULL; variable = variable->next) {
+        if (strlen(variable->name) == name_length &&
+            memcmp(variable->name, name, name_length) == 0) {
+            return variable->value;
+        }
+    }
+    return NULL;
+}
+
+static char* expand_text(const char* text, const shell_variable_t* variables) {
+    size_t output_length = 0;
+    for (size_t i = 0; text[i] != '\0';) {
+        if (text[i] == '$' && is_variable_name_start(text[i + 1])) {
+            size_t name_start = i + 1;
+            size_t name_end = name_start + 1;
+            while (is_variable_name_character(text[name_end])) name_end++;
+            const char* value = find_variable_value(variables, text + name_start,
+                                                    name_end - name_start);
+            size_t value_length = value != NULL ? strlen(value) : 0;
+            if (value_length > SIZE_MAX - output_length - 1) return NULL;
+            output_length += value_length;
+            i = name_end;
+        } else {
+            if (output_length == SIZE_MAX - 1) return NULL;
+            output_length++;
+            i++;
+        }
+    }
+
+    char* expanded = (char*)malloc(output_length + 1);
+    if (expanded == NULL) return NULL;
+
+    size_t output_index = 0;
+    for (size_t i = 0; text[i] != '\0';) {
+        if (text[i] == '$' && is_variable_name_start(text[i + 1])) {
+            size_t name_start = i + 1;
+            size_t name_end = name_start + 1;
+            while (is_variable_name_character(text[name_end])) name_end++;
+            const char* value = find_variable_value(variables, text + name_start,
+                                                    name_end - name_start);
+            if (value != NULL) {
+                size_t value_length = strlen(value);
+                memcpy(expanded + output_index, value, value_length);
+                output_index += value_length;
+            }
+            i = name_end;
+        } else {
+            expanded[output_index++] = text[i++];
+        }
+    }
+    expanded[output_index] = '\0';
+    return expanded;
+}
+
 static const char* builtin_commands[] = {
-    "cd", "exit", "help", "history", "jobs", NULL
+    "cd", "exit", "help", "history", "jobs", "set", NULL
 };
 
 static char* command_generator(const char* text, int state) {
@@ -333,7 +401,125 @@ int parse_line(char* cmdline, command_list_t* commands) {
 int is_builtin_command(const char* command) {
     return strcmp(command, "cd") == 0 || strcmp(command, "exit") == 0 ||
            strcmp(command, "help") == 0 || strcmp(command, "history") == 0 ||
-           strcmp(command, "jobs") == 0;
+           strcmp(command, "jobs") == 0 || strcmp(command, "set") == 0;
+}
+
+int is_variable_assignment(const pipeline_t* pipeline) {
+    if (pipeline->background || pipeline->command_count != 1) return 0;
+    const shell_command_t* command = &pipeline->commands[0];
+    if (command->input_file != NULL || command->output_file != NULL ||
+        command->arglist[0] == NULL || command->arglist[1] != NULL) {
+        return 0;
+    }
+
+    const char* equals = strchr(command->arglist[0], '=');
+    if (equals == NULL || equals == command->arglist[0] ||
+        !is_variable_name_start(command->arglist[0][0])) {
+        return 0;
+    }
+    for (const char* character = command->arglist[0];
+         character < equals; character++) {
+        if (!is_variable_name_character(*character)) return 0;
+    }
+    return 1;
+}
+
+int assign_variable(shell_variable_t** variables, const char* assignment) {
+    const char* equals = strchr(assignment, '=');
+    if (equals == NULL || equals == assignment ||
+        !is_variable_name_start(assignment[0])) {
+        fprintf(stderr, "assignment: invalid variable name.\n");
+        return 1;
+    }
+    for (const char* character = assignment; character < equals; character++) {
+        if (!is_variable_name_character(*character)) {
+            fprintf(stderr, "assignment: invalid variable name.\n");
+            return 1;
+        }
+    }
+
+    size_t name_length = (size_t)(equals - assignment);
+    char* name = (char*)malloc(name_length + 1);
+    char* value = copy_string(equals + 1);
+    if (name == NULL || value == NULL) {
+        free(name);
+        free(value);
+        fprintf(stderr, "assignment: unable to allocate variable.\n");
+        return 1;
+    }
+    memcpy(name, assignment, name_length);
+    name[name_length] = '\0';
+
+    for (shell_variable_t* variable = *variables;
+         variable != NULL; variable = variable->next) {
+        if (strcmp(variable->name, name) == 0) {
+            free(variable->value);
+            variable->value = value;
+            free(name);
+            return 0;
+        }
+    }
+
+    shell_variable_t* variable = (shell_variable_t*)malloc(sizeof(*variable));
+    if (variable == NULL) {
+        free(name);
+        free(value);
+        fprintf(stderr, "assignment: unable to allocate variable.\n");
+        return 1;
+    }
+    variable->name = name;
+    variable->value = value;
+    variable->next = *variables;
+    *variables = variable;
+    return 0;
+}
+
+int expand_pipeline_variables(pipeline_t* pipeline,
+                              const shell_variable_t* variables) {
+    for (int i = 0; i < pipeline->command_count; i++) {
+        shell_command_t* command = &pipeline->commands[i];
+        int first_argument = i == 0 && is_variable_assignment(pipeline) ? 0 : 1;
+        for (int j = first_argument; command->arglist[j] != NULL; j++) {
+            char* expanded = expand_text(command->arglist[j], variables);
+            if (expanded == NULL) {
+                fprintf(stderr, "variable expansion: unable to allocate value.\n");
+                return 0;
+            }
+            free(command->arglist[j]);
+            command->arglist[j] = expanded;
+        }
+        if (command->input_file != NULL) {
+            char* expanded = expand_text(command->input_file, variables);
+            if (expanded == NULL) {
+                fprintf(stderr, "variable expansion: unable to allocate value.\n");
+                return 0;
+            }
+            free(command->input_file);
+            command->input_file = expanded;
+        }
+        if (command->output_file != NULL) {
+            char* expanded = expand_text(command->output_file, variables);
+            if (expanded == NULL) {
+                fprintf(stderr, "variable expansion: unable to allocate value.\n");
+                return 0;
+            }
+            free(command->output_file);
+            command->output_file = expanded;
+        }
+    }
+    return 1;
+}
+
+void free_variables(shell_variable_t** variables) {
+    shell_variable_t* variable = *variables;
+    while (variable != NULL) {
+        shell_variable_t* next = variable->next;
+        free(variable->name);
+        free(variable->value);
+        free(variable);
+        variable = next;
+    }
+    *variables = NULL;
 }
 
 int expand_history(char** cmdline, char* history[], int history_count,
@@ -404,7 +590,8 @@ void add_to_history(char* history[], int* history_count, int* history_start,
 
 int handle_builtin(char* const arglist[], char* history[], int history_count,
                    int history_start, int history_total,
-                   const background_job_t jobs[], int job_count) {
+                   const background_job_t jobs[], int job_count,
+                   const shell_variable_t* variables) {
     if (strcmp(arglist[0], "exit") == 0) {
         return 0;
     }
@@ -421,7 +608,7 @@ int handle_builtin(char* const arglist[], char* history[], int history_count,
     }
 
     if (strcmp(arglist[0], "help") == 0) {
-        printf("Built-in commands: cd <directory>, exit, help, history, jobs\n");
+        printf("Built-in commands: cd <directory>, exit, help, history, jobs, set\n");
         return 0;
     }
 
@@ -441,6 +628,14 @@ int handle_builtin(char* const arglist[], char* history[], int history_count,
                 printf(" %ld", (long)jobs[i].pids[j]);
             }
             printf(" %s\n", jobs[i].command_line);
+        }
+        return 0;
+    }
+
+    if (strcmp(arglist[0], "set") == 0) {
+        for (const shell_variable_t* variable = variables;
+             variable != NULL; variable = variable->next) {
+            printf("%s=%s\n", variable->name, variable->value);
         }
         return 0;
     }
