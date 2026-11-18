@@ -609,6 +609,7 @@ int handle_builtin(char* const arglist[], char* history[], int history_count,
 
     if (strcmp(arglist[0], "help") == 0) {
         printf("Built-in commands: cd <directory>, exit, help, history, jobs, set\n");
+        printf("Note: All listed commands are built into this shell.\n");
         return 0;
     }
 
